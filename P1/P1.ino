@@ -4,9 +4,19 @@
 // rtc object
 RTCZero rtc;
 
+// OJO al carácter volátil de estas variables
+volatile uint32_t _period_sec = 0;
+volatile uint16_t _rtcFlag = 0;
+
+// Macro útil para medir el tiempo transcurrido en milisegundos
+#define elapsedMilliseconds(since_ms) (uint32_t)(millis() - since_ms)
+
 void setup() 
 {
-  SerialUSB.begin(115200);
+  // Registramos el tiempo de comienzo
+  uint32_t t_start_ms = millis();
+
+  SerialUSB.begin(9600);
   while(!SerialUSB) {;}
 
   SerialUSB.print(__DATE__);
@@ -22,25 +32,31 @@ void setup()
     SerialUSB.println("setDateTime() failed!\nExiting ...");
     while (1) { ; }
   }
+
+  // Activar la alarma cada 10 segundos a partir de 5 secs
+  setPeriodicAlarm(10, 5);
+
+  // Limpiamos _rtcFlag
+  _rtcFlag = 0;
+  
+  // Activamos la rutina de atención
+  rtc.attachInterrupt(alarmCallback);
 }
 
 void loop()
 {
-  char dateTime[32];
-  struct tm stm;
-  // Obtenemos el tiempo en posixTime, segundos desde el 1 de enero de 1970
-  time_t epoch = rtc.getEpoch();
+  if ( _rtcFlag ) {
+      
+    // Imprimimos la fecha y la hora
+    printDateTime();
 
-  // Convertimos a la forma habitual de fecha y hora
-  gmtime_r(&epoch, &stm);
-  
-  // Generamos e imprimimos la fecha y la hora 
-  snprintf(dateTime, sizeof(dateTime),"EPOCH %4u/%02u/%02u %02u:%02u:%02u",
-           stm.tm_year + 1900, stm.tm_mon + 1, stm.tm_mday, 
-           stm.tm_hour, stm.tm_min, stm.tm_sec);
-
-  SerialUSB.println(dateTime);
-  delay(1000);
+    // Decrementamos _rtcFlag
+    _rtcFlag--;
+    if ( _rtcFlag) SerialUSB.println("WARNING: Unattended RTC alarm events!");
+    
+    // Apagamos el led
+    //digitalWrite(LED_BUILTIN, LOW);
+  }
 }
 
 bool setDateTime(const char * date_str, const char * time_str)
@@ -63,4 +79,58 @@ bool setDateTime(const char * date_str, const char * time_str)
   rtc.setTime((uint8_t)hour, (uint8_t)min, (uint8_t)sec);
   rtc.setDate((uint8_t)mday, (uint8_t)month, (uint8_t)(year - 2000));
   return true;
+}
+
+// --------------------------------------------------------------------------------
+// Imprime la hora y fecha en un formato internacional estándar
+// --------------------------------------------------------------------------------
+void printDateTime()
+{
+  const char *weekDay[7] = { "Sun", "Mon", "Tue", "Wed", "Thr", "Fri", "Sat" };
+  
+  // Obtenemos el tiempo Epoch, segundos desde el 1 de enero de 1970
+  time_t epoch = rtc.getEpoch();
+
+  // Convertimos a la forma habitual de fecha y hora
+  struct tm stm;
+  gmtime_r(&epoch, &stm);
+  
+  // Generamos e imprimimos la fecha y la hora
+  char dateTime[32]; 
+  snprintf(dateTime, sizeof(dateTime),"%s %4u/%02u/%02u %02u:%02u:%02u",
+           weekDay[stm.tm_wday], 
+           stm.tm_year + 1900, stm.tm_mon + 1, stm.tm_mday, 
+           stm.tm_hour, stm.tm_min, stm.tm_sec);
+
+  SerialUSB.println(dateTime);
+}
+
+// --------------------------------------------------------------------------------
+// Programa la alarma del RTC para que se active en period_sec segundos a 
+// partir de "offset" en segundos desde el instante actual
+// --------------------------------------------------------------------------------
+void setPeriodicAlarm(uint32_t period_sec, uint32_t offsetFromNow_sec)
+{
+  //Se le añade un -1 porque hay un delay de 1 segundo a la hora de imprimir el tiempo
+  _period_sec = period_sec-1;
+  rtc.setAlarmEpoch(rtc.getEpoch() + offsetFromNow_sec);
+
+  // Ver enum Alarm_Match en RTCZero.h
+  rtc.enableAlarm(rtc.MATCH_YYMMDDHHMMSS);
+}
+
+// --------------------------------------------------------------------------------
+// Rutina de servicio asociada a la interrupción provocada por la expiración de la 
+// alarma.
+// --------------------------------------------------------------------------------
+void alarmCallback()
+{
+  // Incrementamos la variable _rtcFlag
+  _rtcFlag++;
+  
+  // Encendemos el led
+  digitalWrite(LED_BUILTIN, HIGH);
+  
+  // Reprogramamos la alarma usando el mismo periodo 
+  rtc.setAlarmEpoch(rtc.getEpoch() + _period_sec);
 }
