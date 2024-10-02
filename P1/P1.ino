@@ -1,15 +1,19 @@
 #include <time.h>
 #include <RTCZero.h>
 #include <Arduino_MKRMEM.h>
+#include <ArduinoLowPower.h>
 
 // rtc object
 RTCZero rtc;
 
 volatile uint32_t _period_sec = 0;
 volatile uint16_t _rtcFlag = 0;
+volatile uint16_t is_rtc_interrupt = 0;
 
 Arduino_W25Q16DV flash(SPI1, FLASH_CS);
 char filename[] = "datos.txt";
+const int externalPin = 5;
+volatile int alarmIterations = 0;
 
 // Macro para medir el tiempo transcurrido en milisegundos
 #define elapsedMilliseconds(since_ms) (uint32_t)(millis() - since_ms)
@@ -28,7 +32,6 @@ void setup()
   flash.begin();
 
   // Montamos el sistema de archivos
-  SerialUSB.println("Mounting ...");
   int res = filesystem.mount();
   if(res != SPIFFS_OK && res != SPIFFS_ERR_NOT_A_FS) {
     SerialUSB.println("mount() failed with error code "); 
@@ -37,7 +40,6 @@ void setup()
   }
 
   // Creamos un nuevo fichero
-  // Podríamos usar create(), pero open() proporciona más flexibilidad (flags)
   File file = filesystem.open(filename,  CREATE | TRUNCATE);
   if (!file) {
     SerialUSB.print("Creation of file ");
@@ -46,10 +48,6 @@ void setup()
     on_exit_with_error_do();
   }
   file.close();
-
-  SerialUSB.print(__DATE__);
-  SerialUSB.print(" ");
-  SerialUSB.println(__TIME__);
 
   // Habilitamos el uso del rtc
   rtc.begin();
@@ -61,6 +59,9 @@ void setup()
     while (1) { ; }
   }
 
+  pinMode(externalPin, INPUT_PULLUP); 
+  LowPower.attachInterruptWakeup(externalPin, externalCallback, FALLING);
+  LowPower.attachInterruptWakeup(RTC_ALARM_WAKEUP, alarmCallback, CHANGE);
   // Activar la alarma cada 10 segundos a partir de 5 secs
   setPeriodicAlarm(10, 5);
 
@@ -69,46 +70,36 @@ void setup()
   
   // Activamos la rutina de atención
   rtc.attachInterrupt(alarmCallback);
+
+  USBDevice.detach();
+  LowPower.sleep();
 }
 
 void loop()
 {
-  if ( _rtcFlag ) {
-      
-    // Imprimimos la fecha y la hora
-    printDateTime();
-    delay(1000);
+    // Si se activó la bandera de interrupciones (ya sea por RTC o por pin externo)
+    if (_rtcFlag) {
+        // Conectar USB para enviar datos
+        USBDevice.attach();
+        delay(1500);
+        SerialUSB.begin(9600);
+        while(!SerialUSB) {;}
 
-        // Abrimos el fichero para lectura
-    File file = filesystem.open(filename,  READ_ONLY);
-    if (!file) {
-      SerialUSB.print("Opening file ");
-      SerialUSB.print(filename);
-      SerialUSB.print(" failed for reading. Aborting ...");
-      on_exit_with_error_do();
-    }    
-    SerialUSB.print("Reading file contents:\n");
-    
-    // Leemos el contenido del fichero hasta alcanzar la marca EOF
-    while(!file.eof()) {
-      char c;
-      int const bytes_read = file.read(&c, sizeof(c));
-      if (bytes_read) {
-        SerialUSB.print(c);
-        if (c == '\n') SerialUSB.print("\t ");
-      }
+        // Obtener la fecha y hora actual
+        char* dateTime = getDateTime();
+        writeInFile(dateTime);
+        readFile();
+        _rtcFlag--;
+
+        // Advertencia si hay eventos de interrupción sin atender
+        if (_rtcFlag > 0) {
+            SerialUSB.println("WARNING: Unattended RTC alarm events!");
+        }
+
+        // Desconectar el USB y dormir el sistema
+        USBDevice.detach();
+        LowPower.sleep();
     }
-
-    // Cerramos el fichero
-    file.close();
-
-    // Decrementamos _rtcFlag
-    _rtcFlag--;
-    if ( _rtcFlag) SerialUSB.println("WARNING: Unattended RTC alarm events!");
-    
-    // Apagamos el led
-    //digitalWrite(LED_BUILTIN, LOW);
-  }
 }
 
 bool setDateTime(const char * date_str, const char * time_str)
@@ -136,7 +127,7 @@ bool setDateTime(const char * date_str, const char * time_str)
 // --------------------------------------------------------------------------------
 // Imprime la hora y fecha en un formato internacional estándar
 // --------------------------------------------------------------------------------
-void printDateTime()
+char* getDateTime()
 {
   const char *weekDay[7] = { "Sun", "Mon", "Tue", "Wed", "Thr", "Fri", "Sat" };
   
@@ -148,14 +139,13 @@ void printDateTime()
   gmtime_r(&epoch, &stm);
   
   // Generamos e imprimimos la fecha y la hora
-  char dateTime[32]; 
+  static char dateTime[32]; 
   snprintf(dateTime, sizeof(dateTime),"%s %4u/%02u/%02u %02u:%02u:%02u\n",
            weekDay[stm.tm_wday], 
            stm.tm_year + 1900, stm.tm_mon + 1, stm.tm_mday, 
            stm.tm_hour, stm.tm_min, stm.tm_sec);
 
-  //SerialUSB.println(dateTime);
-  writeInFile(dateTime);
+  return dateTime;
 }
 
 // --------------------------------------------------------------------------------
@@ -176,38 +166,84 @@ void setPeriodicAlarm(uint32_t period_sec, uint32_t offsetFromNow_sec)
 // Rutina de servicio asociada a la interrupción provocada por la expiración de la 
 // alarma.
 // --------------------------------------------------------------------------------
+
 void alarmCallback()
 {
-  // Incrementamos la variable _rtcFlag
-  _rtcFlag++;
-  
-  // Encendemos el led
-  digitalWrite(LED_BUILTIN, HIGH);
-  
-  // Reprogramamos la alarma usando el mismo periodo 
-  rtc.setAlarmEpoch(rtc.getEpoch() + _period_sec);
+    is_rtc_interrupt = 0;
+    _rtcFlag++;
+    alarmIterations++;
+
+    // Reprogramar la alarma usando el mismo periodo
+    rtc.setAlarmEpoch(rtc.getEpoch() + _period_sec);
 }
 
 void writeInFile(const char* dateTime)
 {
-    File file = filesystem.open(filename,  WRITE_ONLY | APPEND);
+    File file = filesystem.open(filename, WRITE_ONLY | APPEND);
     if (!file) {
-      SerialUSB.print("Opening file ");
-      SerialUSB.print(filename);
-      SerialUSB.print(" failed for appending. Aborting ...");
-      on_exit_with_error_do();
+        SerialUSB.print("Opening file ");
+        SerialUSB.print(filename);
+        SerialUSB.print(" failed for appending. Aborting ...");
+        on_exit_with_error_do();
+    }
+
+    // Escribir el tipo de interrupción que ocurrió
+    const char* message;
+    if (is_rtc_interrupt == 0) {
+        message = "RTC interruption: ";
+    } else if (is_rtc_interrupt == 1) {
+        message = "External pin interruption: ";
+    }
+
+    int messageLength = strlen(message);
+    int bytesWrittenMessage = file.write((void *)message, messageLength);
+    if (bytesWrittenMessage != messageLength) {
+        SerialUSB.println("Failed to write interruption message. Aborting ...");
+        on_exit_with_error_do();
     }
     
+    // Escribir la fecha y hora
     int const bytes_to_write = strlen(dateTime);
     int const bytes_written = file.write((void *)dateTime, bytes_to_write);
     if (bytes_to_write != bytes_written) {
-      SerialUSB.print("write() failed with error code "); 
-      SerialUSB.println(filesystem.err());
-      SerialUSB.println("Aborting ...");
-      on_exit_with_error_do();
+        SerialUSB.print("write() failed with error code "); 
+        SerialUSB.println(filesystem.err());
+        SerialUSB.println("Aborting ...");
+        on_exit_with_error_do();
     }
+
     // Cerramos el fichero
     file.close();
+}
+void readFile()
+{
+          // Abrimos el fichero para lectura
+    File file = filesystem.open(filename,  READ_ONLY);
+    if (!file) {
+      SerialUSB.print("Opening file ");
+      SerialUSB.print(filename);
+      SerialUSB.print(" failed for reading. Aborting ...");
+      on_exit_with_error_do();
+    }    
+    SerialUSB.print("\nReading file contents:\n");
+    
+    // Leemos el contenido del fichero hasta alcanzar la marca EOF
+    while(!file.eof()) {
+      char c;
+      int const bytes_read = file.read(&c, sizeof(c));
+      if (bytes_read) {
+        SerialUSB.print(c);
+      }
+    }
+
+    // Cerramos el fichero
+    file.close();
+}
+
+void externalCallback()
+{
+    is_rtc_interrupt = 1;
+    _rtcFlag++;
 }
 
 void on_exit_with_error_do()
