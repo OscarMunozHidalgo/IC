@@ -14,6 +14,9 @@ Arduino_W25Q16DV flash(SPI1, FLASH_CS);
 char filename[] = "datos.txt";
 const int externalPin = 5;
 volatile int alarmIterations = 0;
+volatile uint32_t lastInterruptTime = 0; // Tiempo de la última interrupción
+const uint32_t debounceDelay = 800; // Retraso de debounce en milisegundos
+
 
 // Macro para medir el tiempo transcurrido en milisegundos
 #define elapsedMilliseconds(since_ms) (uint32_t)(millis() - since_ms)
@@ -88,7 +91,13 @@ void loop()
         // Obtener la fecha y hora actual
         char* dateTime = getDateTime();
         writeInFile(dateTime);
-        readFile();
+
+        if (alarmIterations >= 3) {
+          readFile();
+          delay(500);
+          exit(0);
+        }
+
         _rtcFlag--;
 
         // Advertencia si hay eventos de interrupción sin atender
@@ -240,11 +249,17 @@ void readFile()
     file.close();
 }
 
-void externalCallback()
-{
-    is_rtc_interrupt = 1;
-    _rtcFlag++;
+void externalCallback() {
+    uint32_t currentTime = millis();
+    if ((currentTime - lastInterruptTime) > debounceDelay) {
+        is_rtc_interrupt = 1;
+        _rtcFlag++;
+        SerialUSB.println(_rtcFlag);
+        SerialUSB.println(alarmIterations);
+        lastInterruptTime = currentTime;
+    }
 }
+
 
 void on_exit_with_error_do()
 {
