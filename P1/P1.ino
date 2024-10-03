@@ -1,3 +1,4 @@
+
 #include <time.h>
 #include <RTCZero.h>
 #include <Arduino_MKRMEM.h>
@@ -15,7 +16,7 @@ char filename[] = "datos.txt";
 const int externalPin = 5;
 volatile int alarmIterations = 0;
 volatile uint32_t lastInterruptTime = 0; // Tiempo de la última interrupción
-const uint32_t debounceDelay = 800; // Retraso de debounce en milisegundos
+const uint32_t debounceDelay = 2000; // Retraso de debounce en milisegundos
 
 
 // Macro para medir el tiempo transcurrido en milisegundos
@@ -23,6 +24,7 @@ const uint32_t debounceDelay = 800; // Retraso de debounce en milisegundos
 
 void setup() 
 {
+  //Desactivamos LORA
   pinMode(LORA_RESET, OUTPUT);
   digitalWrite(LORA_RESET, LOW); 
 
@@ -42,7 +44,7 @@ void setup()
     exit(EXIT_FAILURE);
   }
 
-  // Creamos un nuevo fichero
+  // Creamos un nuevo fichero o lo truncamos si ya existe
   File file = filesystem.open(filename,  CREATE | TRUNCATE);
   if (!file) {
     SerialUSB.print("Creation of file ");
@@ -62,9 +64,11 @@ void setup()
     while (1) { ; }
   }
 
+  //Establecemos las inerrupciones que se van a producir
   pinMode(externalPin, INPUT_PULLUP); 
   LowPower.attachInterruptWakeup(externalPin, externalCallback, FALLING);
   LowPower.attachInterruptWakeup(RTC_ALARM_WAKEUP, alarmCallback, CHANGE);
+
   // Activar la alarma cada 10 segundos a partir de 5 secs
   setPeriodicAlarm(10, 5);
 
@@ -74,24 +78,27 @@ void setup()
   // Activamos la rutina de atención
   rtc.attachInterrupt(alarmCallback);
 
+  //Ponemos a dormir el mircocontrolador
   USBDevice.detach();
   LowPower.sleep();
 }
 
 void loop()
 {
-    // Si se activó la bandera de interrupciones (ya sea por RTC o por pin externo)
+    // Si se activó el flag de interrupciones (ya sea por RTC o por pin externo)
     if (_rtcFlag) {
         // Conectar USB para enviar datos
         USBDevice.attach();
         delay(1500);
         SerialUSB.begin(9600);
         while(!SerialUSB) {;}
+        SerialUSB.println("Writing in file...");
 
-        // Obtener la fecha y hora actual
+        // Obtener la fecha y hora actual y escribirla en e fichero
         char* dateTime = getDateTime();
         writeInFile(dateTime);
 
+        //Si han ocurrido 3 iteraciones leemos el contenido del fichero y salimos
         if (alarmIterations >= 3) {
           readFile();
           delay(500);
@@ -111,6 +118,9 @@ void loop()
     }
 }
 
+// --------------------------------------------------------------------------------
+// Ajusta la hora y fecha del rtc a las actuales
+// --------------------------------------------------------------------------------
 bool setDateTime(const char * date_str, const char * time_str)
 {
   char month_str[4];
@@ -134,7 +144,7 @@ bool setDateTime(const char * date_str, const char * time_str)
 }
 
 // --------------------------------------------------------------------------------
-// Imprime la hora y fecha en un formato internacional estándar
+// Devuelve la hora y fecha en un formato internacional estándar
 // --------------------------------------------------------------------------------
 char* getDateTime()
 {
@@ -175,7 +185,6 @@ void setPeriodicAlarm(uint32_t period_sec, uint32_t offsetFromNow_sec)
 // Rutina de servicio asociada a la interrupción provocada por la expiración de la 
 // alarma.
 // --------------------------------------------------------------------------------
-
 void alarmCallback()
 {
     is_rtc_interrupt = 0;
@@ -226,7 +235,7 @@ void writeInFile(const char* dateTime)
 }
 void readFile()
 {
-          // Abrimos el fichero para lectura
+    // Abrimos el fichero para lectura
     File file = filesystem.open(filename,  READ_ONLY);
     if (!file) {
       SerialUSB.print("Opening file ");
@@ -249,17 +258,15 @@ void readFile()
     file.close();
 }
 
+//Rutina de atención por interrupción externa
 void externalCallback() {
     uint32_t currentTime = millis();
     if ((currentTime - lastInterruptTime) > debounceDelay) {
         is_rtc_interrupt = 1;
         _rtcFlag++;
-        SerialUSB.println(_rtcFlag);
-        SerialUSB.println(alarmIterations);
         lastInterruptTime = currentTime;
     }
 }
-
 
 void on_exit_with_error_do()
 {
