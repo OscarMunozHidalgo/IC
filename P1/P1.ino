@@ -9,15 +9,14 @@ RTCZero rtc;
 
 volatile uint32_t _period_sec = 0;
 volatile uint16_t _rtcFlag = 0;
-volatile uint16_t is_rtc_interrupt = 0;
+volatile uint16_t is_rtc_interrupt = 0; //0 sí 1 no
 
 Arduino_W25Q16DV flash(SPI1, FLASH_CS);
 char filename[] = "datos.txt";
-const int externalPin = 5;
+const int externalPin = 5; //Pin para interrupciones externas
 volatile int alarmIterations = 0;
 volatile uint32_t lastInterruptTime = 0; // Tiempo de la última interrupción
 const uint32_t debounceDelay = 2000; // Retraso de debounce en milisegundos
-
 
 // Macro para medir el tiempo transcurrido en milisegundos
 #define elapsedMilliseconds(since_ms) (uint32_t)(millis() - since_ms)
@@ -87,19 +86,22 @@ void loop()
 {
     // Si se activó el flag de interrupciones (ya sea por RTC o por pin externo)
     if (_rtcFlag) {
-        // Conectar USB para enviar datos
-        USBDevice.attach();
-        delay(1500);
-        SerialUSB.begin(9600);
-        while(!SerialUSB) {;}
-        SerialUSB.println("Writing in file...");
 
+        //Encendemos el LED para indicar que estamos escribiendo
+        digitalWrite(LED_BUILTIN, HIGH);
+        delay(200);
+        digitalWrite(LED_BUILTIN, LOW);
+        
         // Obtener la fecha y hora actual y escribirla en e fichero
         char* dateTime = getDateTime();
         writeInFile(dateTime);
 
         //Si han ocurrido 3 iteraciones leemos el contenido del fichero y salimos
         if (alarmIterations >= 3) {
+          USBDevice.attach();
+          delay(1000);
+          SerialUSB.begin(9600);
+          while(!SerialUSB) {;}
           readFile();
           delay(500);
           exit(0);
